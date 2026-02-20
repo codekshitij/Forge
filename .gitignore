@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+
+# Docker
+.dockerignore
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Temp files created by Forge TUI launcher
+/tmp/forge_*
+forge_data_*.json
+forge_tui_*.command
+forge_launcher_*.py
+forge_runner_*.py
+
+# Logs
+*.log
+logs/
+
+# Test output
+.pytest_cache/
+.coverage
+htmlcov/

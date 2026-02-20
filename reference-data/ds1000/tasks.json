@@ -1,0 +1,62 @@
+[
+  {
+    "task": "matmul",
+    "library": "numpy",
+    "time_ms": 10.2,
+    "memory_mb": 4.2,
+    "hardware": "Intel Core i9-12900K",
+    "hardware_notes": "CPU, 32GB RAM, OpenBLAS",
+    "source": "DS-1000",
+    "date": "2022-10",
+    "url": "https://ds1000-code-gen.github.io/",
+    "notes": "Task #142: matrix multiplication 512x512"
+  },
+  {
+    "task": "dot_product",
+    "library": "numpy",
+    "time_ms": 0.31,
+    "memory_mb": 0.8,
+    "hardware": "Intel Core i9-12900K",
+    "hardware_notes": "CPU, 32GB RAM",
+    "source": "DS-1000",
+    "date": "2022-10",
+    "url": "https://ds1000-code-gen.github.io/",
+    "notes": "Task #89: dot product of 10k vectors"
+  },
+  {
+    "task": "norm",
+    "library": "numpy",
+    "time_ms": 0.45,
+    "memory_mb": 1.1,
+    "hardware": "Intel Core i9-12900K",
+    "hardware_notes": "CPU, 32GB RAM",
+    "source": "DS-1000",
+    "date": "2022-10",
+    "url": "https://ds1000-code-gen.github.io/",
+    "notes": "Task #201: L2 normalization of 100k vector"
+  },
+  {
+    "task": "svd",
+    "library": "numpy",
+    "time_ms": 45.3,
+    "memory_mb": 12.8,
+    "hardware": "Intel Core i9-12900K",
+    "hardware_notes": "CPU, LAPACK backend",
+    "source": "DS-1000",
+    "date": "2022-10",
+    "url": "https://ds1000-code-gen.github.io/",
+    "notes": "Task #318: SVD of 512x512 matrix"
+  },
+  {
+    "task": "svd",
+    "library": "pytorch",
+    "time_ms": 12.1,
+    "memory_mb": 8.5,
+    "hardware": "NVIDIA RTX 3080",
+    "hardware_notes": "FP32, GPU",
+    "source": "DS-1000",
+    "date": "2022-10",
+    "url": "https://ds1000-code-gen.github.io/",
+    "notes": "torch.linalg.svd, 512x512"
+  }
+]
