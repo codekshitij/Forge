@@ -2,12 +2,6 @@
 Forge MCP Server
 ================
 Put ML libraries through the fire. Find out which one is strongest.
-
-Exposes tools to Claude Desktop for:
-- Generating idiomatic ML library implementations
-- Executing code safely and measuring performance
-- Comparing results against industry reference data
-- Launching a Textual TUI to visualize benchmark results
 """
 
 import json
@@ -15,13 +9,12 @@ import asyncio
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
-from pathlib import Path
 
 from tools.executor import run_benchmark
 from tools.profiler import profile_code
 from tools.validator import validate_output
 from tools.reference import get_reference_data, list_reference_tasks
-from tools.tui import launch_tui
+from tools.metal_profiler import profile_metal, is_metal_available
 
 # ── Server Init ───────────────────────────────────────────────────────────────
 
@@ -32,97 +25,47 @@ SUPPORTED_TASKS = ["matmul", "dot_product", "svd", "conv2d", "relu", "softmax", 
 
 # ── Input Models ──────────────────────────────────────────────────────────────
 
+class CodeSnippet(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    setup: str = Field(..., description="Imports and data initialization. NOT timed.")
+    run: str = Field(..., description="The core operation to benchmark. Timed. Must assign to 'result'.")
+
 class BenchmarkInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    task_description: str = Field(..., min_length=5, max_length=500)
+    libraries: list[str] = Field(..., min_length=2, max_length=5)
+    generated_code: dict[str, CodeSnippet] = Field(...)
+    iterations: int = Field(default=5, ge=3, le=20)
 
-    task_description: str = Field(
-        ...,
-        description="Natural language description of the task to benchmark (e.g. 'multiply two 512x512 matrices')",
-        min_length=5,
-        max_length=500
-    )
-    libraries: list[str] = Field(
-        ...,
-        description=f"List of libraries to benchmark. Supported: {SUPPORTED_LIBRARIES}",
-        min_length=2,
-        max_length=5
-    )
-    generated_code: dict[str, str] = Field(
-        ...,
-        description="Dict mapping library name to generated implementation code"
-    )
-    iterations: int = Field(
-        default=5,
-        description="Number of benchmark iterations (median will be used)",
-        ge=3,
-        le=20
-    )
-    show_tui: bool = Field(
-        default=True,
-        description="Whether to launch the Textual TUI to show results visually"
-    )
-
+class MetalBenchmarkInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    task_description: str = Field(..., min_length=5, max_length=500)
+    libraries: list[str] = Field(default=["pytorch"])
+    generated_code: dict[str, CodeSnippet] = Field(...)
+    iterations: int = Field(default=5, ge=3, le=20)
 
 class ProfileInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-
-    code: str = Field(..., description="Python code to profile", min_length=10)
-    library: str = Field(..., description=f"Library being used. One of: {SUPPORTED_LIBRARIES}")
-    iterations: int = Field(default=5, ge=3, le=20, description="Number of runs")
-
+    code: CodeSnippet = Field(...)
+    library: str = Field(...)
+    iterations: int = Field(default=5, ge=3, le=20)
 
 class ValidateInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-
-    output_a: str = Field(..., description="JSON-serialized output from implementation A")
-    output_b: str = Field(..., description="JSON-serialized output from implementation B")
-    tolerance: float = Field(default=1e-5, description="Numerical tolerance for comparison", ge=0)
-
+    output_a: str = Field(...)
+    output_b: str = Field(...)
+    tolerance: float = Field(default=1e-5, ge=0)
 
 class ReferenceInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-
-    task_type: str = Field(
-        ...,
-        description=f"Type of ML task. One of: {SUPPORTED_TASKS}"
-    )
-    library: str = Field(
-        ...,
-        description=f"Library name. One of: {SUPPORTED_LIBRARIES}"
-    )
-
+    task_type: str = Field(...)
+    library: str = Field(...)
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
-@mcp.tool(
-    name="forge_run_benchmark",
-    annotations={
-        "title": "Run Full Benchmark",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": False
-    }
-)
+@mcp.tool(name="forge_run_benchmark")
 async def forge_run_benchmark(params: BenchmarkInput) -> str:
-    """Run a full benchmark across multiple ML libraries and display results in a TUI.
-
-    This is the primary Forge tool. Given pre-generated code implementations for
-    each library, it executes them, measures performance, fetches reference data,
-    and optionally launches a Textual TUI showing the comparison.
-
-    Args:
-        params (BenchmarkInput): Benchmark configuration including:
-            - task_description (str): Human-readable description of the task
-            - libraries (list[str]): Libraries to benchmark
-            - generated_code (dict[str, str]): Code per library
-            - iterations (int): Number of runs (default 5)
-            - show_tui (bool): Launch TUI dashboard (default True)
-
-    Returns:
-        str: JSON with full benchmark results including timing, memory, scores,
-             reference comparisons, and winner analysis
-    """
+    """Run a full benchmark across multiple ML libraries and return metrics."""
     results = {}
 
     for library in params.libraries:
@@ -131,10 +74,8 @@ async def forge_run_benchmark(params: BenchmarkInput) -> str:
             results[library] = {"error": f"No code provided for {library}"}
             continue
 
-        profile = await profile_code(code, library, params.iterations)
-        results[library] = profile
+        results[library] = await profile_code(code.setup, code.run, library, params.iterations)
 
-    # Fetch reference data for each library
     reference = {}
     task_key = _infer_task_key(params.task_description)
     for library in params.libraries:
@@ -142,7 +83,6 @@ async def forge_run_benchmark(params: BenchmarkInput) -> str:
         if ref:
             reference[library] = ref
 
-    # Score and rank
     ranked = _score_and_rank(results, reference)
 
     final = {
@@ -156,131 +96,35 @@ async def forge_run_benchmark(params: BenchmarkInput) -> str:
         "summary": _build_summary(params.task_description, results, ranked, reference)
     }
 
-    # Launch TUI if requested — capture result for fallback command
-    if params.show_tui:
-        tui_result = await launch_tui(final)
-        if tui_result and tui_result != "TUI launched ✓":
-            # Auto-launch failed (common from Claude Desktop background process)
-            # Include the open command so Claude can show it to the user
-            final["tui_command"] = tui_result
-            final["tui_note"] = (
-                f"TUI ready — run this in your terminal to open it: {tui_result}"
-            )
-
     return json.dumps(final, indent=2, default=str)
 
 
-@mcp.tool(
-    name="forge_profile",
-    annotations={
-        "title": "Profile Single Implementation",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": False
-    }
-)
+@mcp.tool(name="forge_profile")
 async def forge_profile(params: ProfileInput) -> str:
-    """Profile a single ML code implementation — time, memory, and correctness.
-
-    Use this when you want to measure a specific implementation before running
-    a full cross-library benchmark.
-
-    Args:
-        params (ProfileInput): Contains:
-            - code (str): Python code to execute and profile
-            - library (str): Library name for context
-            - iterations (int): Number of timed runs
-
-    Returns:
-        str: JSON with time_ms (median), memory_mb (peak), iterations, status, output
-    """
-    result = await profile_code(params.code, params.library, params.iterations)
+    """Profile a single ML code implementation — time, memory, and correctness."""
+    result = await profile_code(params.code.setup, params.code.run, params.library, params.iterations)
     return json.dumps(result, indent=2, default=str)
 
 
-@mcp.tool(
-    name="forge_validate",
-    annotations={
-        "title": "Validate Output Equivalence",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False
-    }
-)
+@mcp.tool(name="forge_validate")
 async def forge_validate(params: ValidateInput) -> str:
-    """Check whether two library implementations produce numerically equivalent outputs.
-
-    Use this to verify correctness before benchmarking — ensures you're comparing
-    apples to apples.
-
-    Args:
-        params (ValidateInput): Contains:
-            - output_a (str): JSON-serialized output from first implementation
-            - output_b (str): JSON-serialized output from second implementation
-            - tolerance (float): Acceptable numerical difference (default 1e-5)
-
-    Returns:
-        str: JSON with { equivalent: bool, max_diff: float, shape_match: bool, notes: str }
-    """
+    """Check whether two library implementations produce numerically equivalent outputs."""
     result = validate_output(params.output_a, params.output_b, params.tolerance)
     return json.dumps(result, indent=2)
 
 
-@mcp.tool(
-    name="forge_get_reference",
-    annotations={
-        "title": "Get Industry Reference Benchmark",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False
-    }
-)
+@mcp.tool(name="forge_get_reference")
 async def forge_get_reference(params: ReferenceInput) -> str:
-    """Fetch pre-loaded industry benchmark data (MLPerf, DS-1000) for a task/library combo.
-
-    Use this to anchor live benchmark results against known baselines, or to give
-    Claude context about expected performance before generating code.
-
-    Args:
-        params (ReferenceInput): Contains:
-            - task_type (str): The ML task type (e.g. 'matmul', 'conv2d')
-            - library (str): Library name (e.g. 'pytorch', 'tensorflow')
-
-    Returns:
-        str: JSON with reference result including source, hardware, date, metrics
-    """
+    """Fetch pre-loaded industry benchmark data (MLPerf, DS-1000)."""
     result = get_reference_data(params.task_type, params.library)
     if not result:
-        return json.dumps({
-            "found": False,
-            "message": f"No reference data found for task='{params.task_type}' library='{params.library}'",
-            "available_tasks": SUPPORTED_TASKS,
-            "available_libraries": SUPPORTED_LIBRARIES
-        })
+        return json.dumps({"found": False})
     return json.dumps({"found": True, **result}, indent=2)
 
 
-@mcp.tool(
-    name="forge_list_tasks",
-    annotations={
-        "title": "List Available Reference Tasks",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False
-    }
-)
+@mcp.tool(name="forge_list_tasks")
 async def forge_list_tasks() -> str:
-    """List all tasks and libraries that have pre-loaded reference benchmark data.
-
-    Use this to discover what Forge can benchmark with reference comparisons.
-
-    Returns:
-        str: JSON with supported tasks, libraries, and coverage matrix
-    """
+    """List all tasks and libraries that have pre-loaded reference benchmark data."""
     tasks = list_reference_tasks()
     return json.dumps({
         "supported_libraries": SUPPORTED_LIBRARIES,
@@ -292,87 +136,82 @@ async def forge_list_tasks() -> str:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _infer_task_key(description: str) -> str:
-    """Infer a task key from a natural language description."""
     desc = description.lower()
-    if any(w in desc for w in ["matmul", "matrix mul", "matrix multiply", "mm"]):
-        return "matmul"
-    if any(w in desc for w in ["dot", "dot product", "inner product"]):
-        return "dot_product"
-    if any(w in desc for w in ["svd", "singular value"]):
-        return "svd"
-    if any(w in desc for w in ["conv", "convolution"]):
-        return "conv2d"
-    if any(w in desc for w in ["relu", "activation"]):
-        return "relu"
-    if any(w in desc for w in ["softmax"]):
-        return "softmax"
-    if any(w in desc for w in ["norm", "normalize", "normalisation"]):
-        return "norm"
-    return "matmul"  # default
-
+    if any(w in desc for w in ["matmul", "mm"]): return "matmul"
+    if any(w in desc for w in ["dot"]): return "dot_product"
+    if any(w in desc for w in ["svd"]): return "svd"
+    if any(w in desc for w in ["conv"]): return "conv2d"
+    if any(w in desc for w in ["relu"]): return "relu"
+    if any(w in desc for w in ["softmax"]): return "softmax"
+    if any(w in desc for w in ["norm"]): return "norm"
+    return "matmul"
 
 def _score_and_rank(results: dict, reference: dict) -> list:
-    """Score libraries across speed and memory, return ranked list."""
     scores = []
     valid = {lib: r for lib, r in results.items() if "error" not in r and r.get("time_ms")}
-
-    if not valid:
-        return []
+    if not valid: return []
 
     min_time = min(r["time_ms"] for r in valid.values())
     min_mem = min(r.get("memory_mb", 999) for r in valid.values()) or 1
 
     for lib, result in valid.items():
-        time_score = (min_time / result["time_ms"]) * 60       # 60% weight
-        mem_score = (min_mem / max(result.get("memory_mb", 1), 0.1)) * 20  # 20% weight
-
-        # Reference alignment score (10%)
-        ref_score = 0
-        if lib in reference and "time_ms" in reference[lib]:
-            ref_time = reference[lib]["time_ms"]
-            ratio = min(result["time_ms"], ref_time) / max(result["time_ms"], ref_time)
-            ref_score = ratio * 10
-
-        total = time_score + mem_score + ref_score
+        time_score = (min_time / result["time_ms"]) * 60
+        mem_score = (min_mem / max(result.get("memory_mb", 1), 0.1)) * 20
+        total = time_score + mem_score
         scores.append({
             "library": lib,
             "total_score": round(total, 1),
             "time_ms": result["time_ms"],
-            "memory_mb": result.get("memory_mb"),
-            "speedup_vs_slowest": None
+            "memory_mb": result.get("memory_mb")
         })
 
     scores.sort(key=lambda x: x["total_score"], reverse=True)
-
-    # Add speedup vs slowest
     if scores:
         slowest_time = max(s["time_ms"] for s in scores)
         for s in scores:
             s["speedup_vs_slowest"] = round(slowest_time / s["time_ms"], 2)
-
     return scores
 
-
 def _build_summary(task: str, results: dict, ranked: list, reference: dict) -> str:
-    """Build a human-readable summary of benchmark results."""
-    if not ranked:
-        return "Benchmark failed — no valid results."
-
+    if not ranked: return "Benchmark failed."
     winner = ranked[0]
-    lines = [f"Task: {task}", f"Winner: {winner['library'].upper()} ({winner['time_ms']:.1f}ms median)"]
-
-    if len(ranked) > 1:
-        slowest = ranked[-1]
-        lines.append(f"Slowest: {slowest['library'].upper()} ({slowest['time_ms']:.1f}ms) — {winner['speedup_vs_slowest']}x slower")
-
-    if winner["library"] in reference:
-        ref = reference[winner["library"]]
-        lines.append(f"vs MLPerf baseline: {ref.get('time_ms', '?')}ms on {ref.get('hardware', 'unknown hardware')}")
-
-    return " | ".join(lines)
+    return f"Task: {task} | Winner: {winner['library'].upper()} ({winner['time_ms']:.1f}ms median)"
 
 
-# ── Entry Point ───────────────────────────────────────────────────────────────
+@mcp.tool(name="forge_metal_benchmark")
+async def forge_metal_benchmark(params: MetalBenchmarkInput) -> str:
+    """Benchmark ML operations on Apple Silicon Metal GPU vs CPU."""
+    if not is_metal_available():
+        return json.dumps({"error": "Metal/MPS not available."})
+
+    cpu_results, metal_results = {}, {}
+
+    for library in params.libraries:
+        cpu_code = params.generated_code.get(library)
+        metal_code = params.generated_code.get(f"{library}_metal")
+
+        if not cpu_code:
+            cpu_results[library] = {"status": "error"}
+            continue
+
+        cpu_results[library] = await profile_code(cpu_code.setup, cpu_code.run, library, params.iterations)
+
+        if metal_code and library == "pytorch":
+            metal_results[library] = await profile_metal(metal_code.setup, metal_code.run, library, params.iterations)
+
+    speedups = {}
+    for lib in params.libraries:
+        cpu_t  = cpu_results.get(lib, {}).get("time_ms")
+        metal_t = metal_results.get(lib, {}).get("time_ms")
+        if cpu_t and metal_t and metal_t > 0:
+            speedups[lib] = round(cpu_t / metal_t, 2)
+
+    return json.dumps({
+        "task": params.task_description,
+        "cpu_results": cpu_results,
+        "metal_results": metal_results,
+        "gpu_speedups": speedups
+    }, indent=2, default=str)
 
 if __name__ == "__main__":
     mcp.run()

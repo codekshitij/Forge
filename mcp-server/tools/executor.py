@@ -11,7 +11,7 @@ from tools.profiler import profile_code
 
 
 async def run_benchmark(
-    generated_code: dict[str, str],
+    generated_code: dict[str, dict[str, str]],
     libraries: list[str],
     iterations: int = 5
 ) -> dict[str, Any]:
@@ -28,11 +28,16 @@ async def run_benchmark(
     """
     tasks = []
     for lib in libraries:
-        code = generated_code.get(lib)
-        if not code:
+        snippet = generated_code.get(lib)
+        if not snippet:
             tasks.append(_error_result(lib, "No code provided"))
             continue
+        
+        # Handle dict or Pydantic object depending on how it's passed
+        setup_code = snippet.setup if hasattr(snippet, 'setup') else snippet.get('setup', '')
+        run_code = snippet.run if hasattr(snippet, 'run') else snippet.get('run', '')
         tasks.append(profile_code(code, lib, iterations))
+
 
     results_list = await asyncio.gather(*tasks, return_exceptions=False)
 

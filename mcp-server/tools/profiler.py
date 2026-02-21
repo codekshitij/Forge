@@ -19,8 +19,9 @@ import docker
 DOCKER_IMAGE = "forge-sandbox:latest"
 TIMEOUT_SECONDS = 90
 WARMUP_RUNS = 2
-MEMORY_LIMIT = "2g"     # Max RAM per container
-CPU_LIMIT = 1.0         # CPU cores per container
+# Set limits high enough to not bottleneck your Mac
+MEMORY_LIMIT = "8g"
+CPU_LIMIT = 8.0
 
 
 def _get_docker_client():
@@ -33,7 +34,7 @@ def _get_docker_client():
         )
 
 
-async def profile_code(code: str, library: str, iterations: int = 5) -> dict[str, Any]:
+async def profile_code(setup_code: str, run_code: str, library: str, iterations: int = 5) -> dict[str, Any]:
     """
     Profile a code snippet inside an isolated Docker container.
 
@@ -42,14 +43,15 @@ async def profile_code(code: str, library: str, iterations: int = 5) -> dict[str
     the container.
 
     Args:
-        code: Python code to execute. Must assign output to `result`.
+        setup_code: Python code for imports and data initialization.
+        run_code: Python code to execute and time. Must assign output to `result`.
         library: Library name (for labeling results).
         iterations: Number of timed runs (median will be used).
 
     Returns:
         Dict with time_ms, memory_mb, status, iterations, library.
     """
-    runner_script = _build_runner(code, iterations, WARMUP_RUNS)
+    runner_script = _build_runner(setup_code, run_code, iterations, WARMUP_RUNS)
 
     try:
         result = await asyncio.wait_for(
@@ -163,7 +165,7 @@ def _parse_output(output: str, library: str) -> dict[str, Any]:
     }
 
 
-def _build_runner(code: str, iterations: int, warmup: int) -> str:
+def _build_runner(setup_code: str, run_code: str, iterations: int, warmup: int) -> str:
     """Build the runner script that executes inside the Docker container."""
     return textwrap.dedent(f'''\
 import time
@@ -172,33 +174,46 @@ import tracemalloc
 import statistics
 import sys
 
-USER_CODE = {repr(code)}
+SETUP_CODE = {repr(setup_code)}
+RUN_CODE = {repr(run_code)}
+
+ns = {{}}
+
+# 1. Execute setup once (NOT timed)
+try:
+    exec(compile(SETUP_CODE, "<forge_setup>", "exec"), ns)
+except Exception as e:
+    print(json.dumps({{"status": "error", "error": f"Setup failed: {{e}}"}}))
+    sys.exit(1)
+
+# Pre-compile the run code to avoid compilation overhead during benchmarking
+run_compiled = compile(RUN_CODE, "<forge_run>", "exec")
 
 def run_once():
-    ns = {{}}
-    exec(compile(USER_CODE, "<forge>", "exec"), ns)
-    return ns.get("result", None)
+    exec(run_compiled, ns)
 
-# Warmup runs (not timed)
+# 2. Warmup runs (not timed)
 for _ in range({warmup}):
     try:
         run_once()
     except Exception:
         pass
 
-# Timed runs
+# 3. Timed runs
 times = []
 peak_memories = []
 
 for i in range({iterations}):
     tracemalloc.start()
+    
     t0 = time.perf_counter()
     try:
         run_once()
     except Exception as e:
-        print(json.dumps({{"status": "error", "error": str(e)}}))
+        print(json.dumps({{"status": "error", "error": f"Run failed: {{e}}"}}))
         sys.exit(1)
     t1 = time.perf_counter()
+    
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
